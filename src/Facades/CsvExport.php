@@ -8,22 +8,24 @@ use Illuminate\Support\Facades\Facade;
 
 /**
  * @method static \Symfony\Component\HttpFoundation\StreamedResponse download(
- *     iterable|\Illuminate\Contracts\Support\Arrayable|array $data,
+ *     iterable|\Illuminate\Contracts\Support\Arrayable $data,
  *     string $filename = 'export.csv',
  *     ?array $headers = null,
- *     ?string $delimiter = null
+ *     ?string $delimiter = null,
+ *     ?callable $progress = null
  * )
  *
  * @method static string store(
- *     iterable|\Illuminate\Contracts\Support\Arrayable|array $data,
+ *     iterable|\Illuminate\Contracts\Support\Arrayable $data,
  *     string $path,
  *     ?array $headers = null,
  *     ?string $disk = null,
- *     ?string $delimiter = null
+ *     ?string $delimiter = null,
+ *     ?callable $progress = null
  * )
  *
  * @method static string toString(
- *     iterable|\Illuminate\Contracts\Support\Arrayable|array $data,
+ *     iterable|\Illuminate\Contracts\Support\Arrayable $data,
  *     ?array $headers = null,
  *     ?string $delimiter = null
  * )

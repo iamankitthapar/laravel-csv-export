@@ -5,31 +5,31 @@ declare(strict_types=1);
 namespace IamAnkitThapar\LaravelCsvExport;
 
 use Illuminate\Contracts\Support\Arrayable;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
-use Traversable;
 
 class CsvExporter
 {
     /**
-     * Download data as a CSV file.
+     * Download data as a streamed CSV file.
      *
-     * @param iterable<mixed>|Arrayable<mixed>|array<mixed> $data
+     * @param iterable<mixed>|Arrayable<mixed> $data
      * @param array<string>|null $headers
+     * @param callable(int, mixed): void|null $progress
      */
     public function download(
         iterable|Arrayable $data,
         string $filename = 'export.csv',
         ?array $headers = null,
-        ?string $delimiter = null
+        ?string $delimiter = null,
+        ?callable $progress = null
     ): StreamedResponse {
         $filename = $this->normalizeFilename($filename);
         $delimiter ??= (string) config('csv-export.delimiter', ',');
 
         return response()->streamDownload(
-            function () use ($data, $headers, $delimiter): void {
+            function () use ($data, $headers, $delimiter, $progress): void {
                 $handle = fopen('php://output', 'wb');
 
                 if ($handle === false) {
@@ -38,40 +38,17 @@ class CsvExporter
                     );
                 }
 
-                if ((bool) config('csv-export.utf8_bom', true)) {
-                    fwrite($handle, "\xEF\xBB\xBF");
-                }
-
-                $rows = $this->normalizeData($data);
-
-                $firstRow = $rows->first();
-
-                if ($firstRow === null) {
-                    fclose($handle);
-
-                    return;
-                }
-
-                $firstRow = $this->normalizeRow($firstRow);
-
-                $csvHeaders = $headers ?? array_keys($firstRow);
-
-                if ($csvHeaders !== []) {
-                    $this->writeRow($handle, $csvHeaders, $delimiter);
-                }
-
-                foreach ($rows as $row) {
-                    $normalizedRow = $this->normalizeRow($row);
-
-                    $orderedRow = $this->orderRowByHeaders(
-                        $normalizedRow,
-                        array_keys($firstRow)
+                try {
+                    $this->write(
+                        $handle,
+                        $data,
+                        $headers,
+                        $delimiter,
+                        $progress
                     );
-
-                    $this->writeRow($handle, $orderedRow, $delimiter);
+                } finally {
+                    fclose($handle);
                 }
-
-                fclose($handle);
             },
             $filename,
             [
@@ -84,20 +61,23 @@ class CsvExporter
     /**
      * Save CSV data to a Laravel storage disk.
      *
-     * @param iterable<mixed>|Arrayable<mixed>|array<mixed> $data
+     * @param iterable<mixed>|Arrayable<mixed> $data
      * @param array<string>|null $headers
+     * @param callable(int, mixed): void|null $progress
      */
     public function store(
         iterable|Arrayable $data,
         string $path,
         ?array $headers = null,
         ?string $disk = null,
-        ?string $delimiter = null
+        ?string $delimiter = null,
+        ?callable $progress = null
     ): string {
         $disk ??= (string) config('csv-export.disk', 'local');
         $delimiter ??= (string) config('csv-export.delimiter', ',');
 
-        $stream = fopen('php://temp', 'w+b');
+        // Spill exports larger than 5 MiB to a temporary file automatically.
+        $stream = fopen('php://temp/maxmemory:5242880', 'w+b');
 
         if ($stream === false) {
             throw new InvalidArgumentException(
@@ -105,38 +85,14 @@ class CsvExporter
             );
         }
 
-        if ((bool) config('csv-export.utf8_bom', true)) {
-            fwrite($stream, "\xEF\xBB\xBF");
+        try {
+            $this->write($stream, $data, $headers, $delimiter, $progress);
+
+            rewind($stream);
+            $saved = Storage::disk($disk)->put($path, $stream);
+        } finally {
+            fclose($stream);
         }
-
-        $rows = $this->normalizeData($data);
-        $firstRow = $rows->first();
-
-        if ($firstRow !== null) {
-            $firstRow = $this->normalizeRow($firstRow);
-            $csvHeaders = $headers ?? array_keys($firstRow);
-
-            if ($csvHeaders !== []) {
-                $this->writeRow($stream, $csvHeaders, $delimiter);
-            }
-
-            foreach ($rows as $row) {
-                $normalizedRow = $this->normalizeRow($row);
-
-                $orderedRow = $this->orderRowByHeaders(
-                    $normalizedRow,
-                    array_keys($firstRow)
-                );
-
-                $this->writeRow($stream, $orderedRow, $delimiter);
-            }
-        }
-
-        rewind($stream);
-
-        $saved = Storage::disk($disk)->put($path, $stream);
-
-        fclose($stream);
 
         if ($saved === false) {
             throw new InvalidArgumentException(
@@ -150,7 +106,10 @@ class CsvExporter
     /**
      * Convert data into CSV text.
      *
-     * @param iterable<mixed>|Arrayable<mixed>|array<mixed> $data
+     * This method keeps the resulting string in memory. Prefer download() or
+     * store() for large exports.
+     *
+     * @param iterable<mixed>|Arrayable<mixed> $data
      * @param array<string>|null $headers
      */
     public function toString(
@@ -159,7 +118,6 @@ class CsvExporter
         ?string $delimiter = null
     ): string {
         $delimiter ??= (string) config('csv-export.delimiter', ',');
-
         $stream = fopen('php://temp', 'w+b');
 
         if ($stream === false) {
@@ -168,38 +126,14 @@ class CsvExporter
             );
         }
 
-        if ((bool) config('csv-export.utf8_bom', true)) {
-            fwrite($stream, "\xEF\xBB\xBF");
+        try {
+            $this->write($stream, $data, $headers, $delimiter);
+
+            rewind($stream);
+            $contents = stream_get_contents($stream);
+        } finally {
+            fclose($stream);
         }
-
-        $rows = $this->normalizeData($data);
-        $firstRow = $rows->first();
-
-        if ($firstRow !== null) {
-            $firstRow = $this->normalizeRow($firstRow);
-            $csvHeaders = $headers ?? array_keys($firstRow);
-
-            if ($csvHeaders !== []) {
-                $this->writeRow($stream, $csvHeaders, $delimiter);
-            }
-
-            foreach ($rows as $row) {
-                $normalizedRow = $this->normalizeRow($row);
-
-                $orderedRow = $this->orderRowByHeaders(
-                    $normalizedRow,
-                    array_keys($firstRow)
-                );
-
-                $this->writeRow($stream, $orderedRow, $delimiter);
-            }
-        }
-
-        rewind($stream);
-
-        $contents = stream_get_contents($stream);
-
-        fclose($stream);
 
         if ($contents === false) {
             throw new InvalidArgumentException(
@@ -211,24 +145,62 @@ class CsvExporter
     }
 
     /**
-     * @param iterable<mixed>|Arrayable<mixed>|array<mixed> $data
+     * @param resource $handle
+     * @param iterable<mixed>|Arrayable<mixed> $data
+     * @param array<string>|null $headers
+     * @param callable(int, mixed): void|null $progress
      */
-    private function normalizeData(
-        iterable|Arrayable $data
-    ): Collection {
-        if ($data instanceof Collection) {
-            return $data;
+    private function write(
+        $handle,
+        iterable|Arrayable $data,
+        ?array $headers,
+        string $delimiter,
+        ?callable $progress = null
+    ): void {
+        if ((bool) config('csv-export.utf8_bom', true)) {
+            fwrite($handle, "\xEF\xBB\xBF");
         }
 
-        if ($data instanceof Arrayable) {
-            return collect($data->toArray());
+        $columnKeys = null;
+        $rowNumber = 0;
+
+        foreach ($this->toIterable($data) as $row) {
+            $normalizedRow = $this->normalizeRow($row);
+
+            if ($columnKeys === null) {
+                $columnKeys = array_keys($normalizedRow);
+                $csvHeaders = $headers ?? $columnKeys;
+
+                if ($csvHeaders !== []) {
+                    $this->writeRow($handle, $csvHeaders, $delimiter);
+                }
+            }
+
+            $this->writeRow(
+                $handle,
+                $this->orderRowByHeaders($normalizedRow, $columnKeys),
+                $delimiter
+            );
+
+            $rowNumber++;
+
+            if ($progress !== null) {
+                $progress($rowNumber, $row);
+            }
+        }
+    }
+
+    /**
+     * @param iterable<mixed>|Arrayable<mixed> $data
+     * @return iterable<mixed>
+     */
+    private function toIterable(iterable|Arrayable $data): iterable
+    {
+        if ($data instanceof Arrayable && ! is_iterable($data)) {
+            return $data->toArray();
         }
 
-        if ($data instanceof Traversable) {
-            return collect(iterator_to_array($data));
-        }
-
-        return collect($data);
+        return $data;
     }
 
     /**
@@ -263,10 +235,12 @@ class CsvExporter
         }
 
         if (is_array($value) || is_object($value)) {
-            return json_encode(
+            $json = json_encode(
                 $value,
                 JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
             );
+
+            return $json === false ? '' : $json;
         }
 
         return $value;
@@ -289,17 +263,14 @@ class CsvExporter
      * @param resource $handle
      * @param array<mixed> $row
      */
-    private function writeRow(
-        $handle,
-        array $row,
-        string $delimiter
-    ): void {
+    private function writeRow($handle, array $row, string $delimiter): void
+    {
         fputcsv(
             $handle,
             $row,
             $delimiter,
             (string) config('csv-export.enclosure', '"'),
-            (string) config('csv-export.escape', '\\')
+            (string) config('csv-export.escape', '')
         );
     }
 
@@ -308,7 +279,7 @@ class CsvExporter
         $filename = trim($filename);
 
         if ($filename === '') {
-            $filename = 'export.csv';
+            return 'export.csv';
         }
 
         if (! str_ends_with(strtolower($filename), '.csv')) {

@@ -1,7 +1,7 @@
 # Laravel CSV Export
 
-A simple Laravel package for exporting arrays, collections, and Eloquent query
-results to CSV files.
+A simple Laravel package for exporting arrays, collections, generators, and
+Eloquent query results to CSV files with memory-friendly streaming.
 
 ## Requirements
 
@@ -48,6 +48,57 @@ return CsvExport::download(
 );
 ```
 
+## Large dataset exports
+
+Avoid loading an entire table with `User::all()`. For large exports, pass a
+Laravel lazy query directly to the exporter. Rows are written as they arrive
+and are not converted to a normal collection.
+
+`lazyById()` is recommended for very large, ID-based exports:
+
+```php
+return CsvExport::download(
+    User::query()
+        ->select('id', 'name', 'email')
+        ->lazyById(1000),
+    'users.csv'
+);
+```
+
+The exporter also accepts `lazy()`, `cursor()`, `LazyCollection`, and PHP
+generators:
+
+```php
+return CsvExport::download(
+    User::query()
+        ->select('id', 'name', 'email')
+        ->cursor(),
+    'users.csv'
+);
+```
+
+For extremely large database results, prefer `lazy()` or `lazyById()` over
+`cursor()`, as PDO drivers may buffer cursor query results.
+
+## Progress callbacks
+
+The optional callback runs after each row is written and receives the
+one-based row number plus the original source row:
+
+```php
+return CsvExport::download(
+    data: User::query()->lazyById(1000),
+    filename: 'users.csv',
+    progress: function (int $row, mixed $user): void {
+        if ($row % 1000 === 0) {
+            logger()->info("Exported {$row} users");
+        }
+    }
+);
+```
+
+Progress callbacks are available on both `download()` and `store()`.
+
 ## Custom headers
 
 ```php
@@ -77,6 +128,9 @@ CsvExport::store(
 ```php
 $csv = CsvExport::toString($users);
 ```
+
+`toString()` necessarily holds the final CSV text in memory. Use `download()`
+or `store()` for large datasets.
 
 ## Testing
 
